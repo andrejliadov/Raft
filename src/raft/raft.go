@@ -82,7 +82,12 @@ type LogEntry struct {
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 	// Your code here (2A)
-	return rf.term, rf.isleader
+	rf.mu.Lock()
+	t := rf.term
+	leader := rf.isleader
+	rf.mu.Unlock()
+
+	return t, leader
 }
 
 //
@@ -175,12 +180,16 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.Term = rf.term
 	}
 	if reply.Votegranted {
+		rf.mu.Lock()
+		rf.isleader = false
+		rf.mu.Unlock()
 		rf.votedFor = args.CandidateID
+		rf.mu.Lock()
 		rf.term = args.Term
+		rf.mu.Unlock()
 		appendMessage := LogEntry{Command: "RequestVote", Term: rf.term}
 		rf.log = append(rf.log, appendMessage)
 	}
-
 }
 
 func Min(x int, y int) int {
@@ -205,9 +214,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	if args.LeaderCommitIndex > rf.commitIndex {
 		rf.commitIndex = Min(args.LeaderCommitIndex, len(rf.log))
+		rf.mu.Lock()
+		rf.isleader = false
+		rf.mu.Unlock()
 	}
 
+	rf.mu.Lock()
 	rf.lastHeartbeatTime = time.Now()
+	rf.mu.Unlock()
 
 }
 
@@ -277,7 +291,9 @@ func (rf *Raft) makeAppendEntriesPackets() (AppendEntriesArgs, AppendEntriesRepl
 func (rf *Raft) heartBeat() {
 	count := 1
 	for true {
+		rf.mu.Lock()
 		if rf.isleader {
+			rf.mu.Unlock()
 			args, reply := rf.makeAppendEntriesPackets()
 			for i := 0; i < len(rf.peers); i++ {
 				if rf.sendAppendEntry(i, &args, &reply) {
@@ -286,11 +302,14 @@ func (rf *Raft) heartBeat() {
 			}
 
 			if count < int(len(rf.peers)/2)+1 {
+				rf.mu.Lock()
 				rf.isleader = false
+				rf.mu.Unlock()
 			}
 
-			time.Sleep(50 * time.Millisecond)
+			time.Sleep(10 * time.Millisecond)
 		} else {
+			rf.mu.Unlock()
 			time.Sleep(10 * time.Millisecond)
 		}
 		count = 1
@@ -303,14 +322,23 @@ func (rf *Raft) electionTimeout() {
 	var timeout int64 = rand.Int63n(max-min) + min
 
 	for true {
+		rf.mu.Lock()
 		if !rf.isleader {
+			rf.mu.Unlock()
 			timeout = rand.Int63n(max-min) + min
-			for time.Now().Sub(rf.lastHeartbeatTime).Nanoseconds() < timeout {
+			rf.mu.Lock()
+			isNewTerm := time.Now().Sub(rf.lastHeartbeatTime).Nanoseconds() < timeout
+			rf.mu.Unlock()
+			for isNewTerm {
 				time.Sleep(10 * time.Millisecond)
+				rf.mu.Lock()
+				isNewTerm = time.Now().Sub(rf.lastHeartbeatTime).Nanoseconds() < timeout
+				rf.mu.Unlock()
 			}
 
 			rf.StartElection()
 		} else {
+			rf.mu.Unlock()
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
@@ -342,7 +370,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 func (rf *Raft) StartElection() {
 	if !rf.isleader {
+		rf.mu.Lock()
 		rf.term = rf.term + 1
+		rf.mu.Unlock()
 		rf.votedFor = rf.me
 		rf.lastHeartbeatTime = time.Now()
 		args := &RequestVoteArgs{Term: rf.term, CandidateID: rf.me, LastLogIndex: len(rf.log), LastLogTerm: rf.term}
@@ -360,7 +390,9 @@ func (rf *Raft) StartElection() {
 			}
 		}
 		if count >= int(len(rf.peers)/2)+1 {
+			rf.mu.Lock()
 			rf.isleader = true
+			rf.mu.Unlock()
 		}
 	}
 }
